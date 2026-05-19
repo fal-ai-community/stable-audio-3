@@ -44,7 +44,7 @@ uv run python scripts/train_lora.py \
 
 # Training Configuration
 
-> Looking for more advanced training tooling? Check out [Underfit](https://github.com/dada-bots/underfit) from Dadabots. There you can find TODO fill-this in
+> Looking for more advanced training tooling? Check out [Underfit](https://github.com/dada-bots/underfit) from Dadabots. There you can find scripts to orchestrate LoRA training runs, monitor runs from a dashboard, and much much more.
 
 ## CLI Arguments
 

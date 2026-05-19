@@ -537,10 +537,7 @@ def create_sampling_ui(stable_audio_3_model, default_prompt=None):
         api_name="generate")
 
     def _prompt_assistant_or_download(text, progress=gr.Progress(track_tqdm=True)):
-        if not _reprompt_is_model_cached(_reprompt_model_id):
-            progress(0.0, desc="Downloading prompt assistant model…")
-            _reprompt_get_model(_reprompt_model_id)
-            return text, gr.update(), gr.update(value="Prompt Assistant")
+        _reprompt_get_model(_reprompt_model_id)
         _, result, _ = _reprompt_fn(text, "Auto", "", _reprompt_model_id, 128, 1.11)
         m = _LENGTH_EXTRACT_RE.search(result)
         if m:
@@ -549,12 +546,13 @@ def create_sampling_ui(stable_audio_3_model, default_prompt=None):
             result = result[:m.start()]
         else:
             seconds = gr.update()
-        return result, seconds, gr.update()
+        return result, seconds, gr.update(value="Prompt Assistant")
 
     prompt_assistant_button.click(
         fn=_prompt_assistant_or_download,
         inputs=[prompt],
-        outputs=[prompt, seconds_total_slider, prompt_assistant_button]
+        outputs=[prompt, seconds_total_slider, prompt_assistant_button],
+        concurrency_limit=1,
     )
 
 def create_diffusion_cond_ui(model, gradio_title="", default_prompt=None):

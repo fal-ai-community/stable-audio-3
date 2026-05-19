@@ -341,13 +341,21 @@ TRACK_TYPE_PREFIXES = {
 _cache = {"model_id": None, "tokenizer": None, "model": None}
 
 
+_WEIGHT_SUFFIXES = (".safetensors", ".bin")
+
 def is_model_cached(model_id):
     if _cache["model_id"] == model_id:
         return True
     try:
-        return any(repo.repo_id == model_id for repo in scan_cache_dir().repos)
+        for repo in scan_cache_dir().repos:
+            if repo.repo_id != model_id:
+                continue
+            for rev in repo.revisions:
+                if any(f.file_name.endswith(_WEIGHT_SUFFIXES) for f in rev.files):
+                    return True
     except Exception:
-        return False
+        pass
+    return False
 
 
 def get_model(model_id):

@@ -19,7 +19,7 @@ Stable Audio 3 is the next generation of Stable Audio: a focused, streamlined pl
 | [**Stable Audio 3 Small-Music**](https://huggingface.co/stabilityai/stable-audio-3-small-music) | `small-music` | SAME-Small | CPU | 433M | 120s | Lightweight music-only inference, no GPU required |
 | [**Stable Audio 3 Small-SFX**](https://huggingface.co/stabilityai/stable-audio-3-small-sfx) | `small-sfx` | SAME-Small | CPU | 433M | 120s | Lightweight sound effects-only inference, no GPU required |
 | [**Stable Audio 3 Medium**](https://huggingface.co/stabilityai/stable-audio-3-medium) | `medium` | SAME-Large | GPU (CUDA) | 1.4B | 380s | High Quality, Fast Inference |
-| **Stable Audio 3 Large** | — | SAME-Large | API only | 2.7B | 380s | Highest quality, API only. Not supported by this repo, see the [API docs](TODO) |
+| **Stable Audio 3 Large** | — | SAME-Large | API only | 2.7B | 380s | Highest quality, API only. Not supported by this repo, see the [API docs](https://stableaudio.com/user-guide) |
 
 Base (un-post-trained) checkpoints, the SAME autoencoders, and optimized variants are available in the [Extra Models collection](https://huggingface.co/collections/stabilityai/stable-audio-3-extra).
 
@@ -200,20 +200,9 @@ audio_out = ae.decode(latents)
 See [Autoencoder Workflows](docs/workflows/autoencoder.md) for encoding batches, chunked processing, and pre-encoding datasets for LoRA training.
 
 ## Hardware Support
-Stable Audio 3 scales from a laptop to a GPU server. Right now, we have scripts for generating audio with various backends.
+Stable Audio 3 scales from a laptop to a GPU server.
 
-TODO: FINISH THIS
-
-As an example,
-```
-bash optimized/run_trt.sh
-
-```
-
-
-Check out the `optimized/` directory for other options
-
-*More Hardware Support COMING SOON*
+*Hardware Support Scripts COMING SOON*
 
 
 ## Docs
@@ -232,7 +221,7 @@ Check out the `optimized/` directory for other options
 
 - [Harmonai Discord](https://discord.gg/cKpvjey8b): Check out our Harmonai Discord server run by the research team. Besides good discussions, we host weekly office hours talking all things AI audio and music and want to hear what you come up with!
 
-- [Underfit](https://github.com/dada-bots/underfit): A LoRA training poweruser dream from Dadabots. If LoRA training in this repo is not enough, check out some experimental tools there.
+- [Underfit](https://github.com/dada-bots/underfit): A LoRA training poweruser dream from Dadabots. If LoRA training in this repo is not enough, check out some experimental tools there like agentic LoRA orchestrations and monitoring.
 
 ---
 
