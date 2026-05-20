@@ -1,3 +1,11 @@
+"""
+stable-audio — command-line interface for Stable Audio 3.
+
+Basic usage::
+
+    stable-audio --model small-music -p "lo-fi hip hop beat, 90 BPM" --duration 30 -o beat.wav
+
+"""
 import argparse
 import os
 import warnings
@@ -65,8 +73,8 @@ def main():
         "--duration",
         type=float,
         nargs="+",
-        default=[30.0],
-        help="Duration in seconds (default: 30). Pass multiple for per-batch durations",
+        default=[120.0],
+        help="Duration in seconds (default: 120). Pass multiple for per-batch durations",
     )
     parser.add_argument(
         "--steps", type=int, default=8, help="Diffusion steps (default: 8)"

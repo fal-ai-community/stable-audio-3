@@ -106,6 +106,12 @@ MAX_JOBS=8 \
 - `TORCH_CUDA_ARCH_LIST` — set to your GPU's compute capability: `8.0` (A100), `8.6` (A10/RTX 3090), `8.9` (L4/RTX 4090), `9.0` (H100/H200)
 - `MAX_JOBS` — number of parallel compile jobs; 4–8 is typical, reduce if you run out of RAM during compilation
 
+**Note:** `flash-attn` is not declared in `pyproject.toml`, so a plain `uv sync` will remove it. Use `uv sync --inexact` to install/update dependencies without removing packages that aren't in the lockfile:
+
+```bash
+uv sync --inexact
+```
+
 ## Quick Start
 
 Launch the Gradio UI:
@@ -198,6 +204,37 @@ audio_out = ae.decode(latents)
 ```
 
 See [Autoencoder Workflows](docs/workflows/autoencoder.md) for encoding batches, chunked processing, and pre-encoding datasets for LoRA training.
+
+## CLI
+
+A `stable-audio` cli is included for running generation without writing any Python.
+
+**Text-to-audio:**
+```bash
+stable-audio --model small-music -p "lo-fi hip hop beat, 90 BPM" --duration 30 -o beat.wav
+```
+
+**Audio-to-audio** — restyle an existing recording:
+```bash
+stable-audio -p "bossa nova bassline" --init-audio input.wav --init-noise-level 0.8 -o out.wav
+```
+
+**Inpainting** — regenerate a region while keeping the rest:
+```bash
+stable-audio -p "punchy kick drum fill" --inpaint-audio input.wav --inpaint-start 4 --inpaint-end 8 -o out.wav
+```
+
+**Continuation** — extend a clip beyond its original length:
+```bash
+stable-audio -p "dreamy synth outro" --inpaint-audio input.wav --inpaint-start 10 --inpaint-end 30 --duration 30 -o out.wav
+```
+
+**With a LoRA:**
+```bash
+stable-audio -p "orchestral strings" --lora-ckpt-path my_lora.safetensors --lora-strength 0.8 -o out.wav
+```
+
+Run `stable-audio --help` for the full list of flags.
 
 ## Hardware Support
 Stable Audio 3 scales from a laptop to a GPU server.

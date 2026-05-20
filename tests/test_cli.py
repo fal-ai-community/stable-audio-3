@@ -119,7 +119,7 @@ def test_text_to_audio_defaults(mock_model):
     mock_model.generate.assert_called_once()
     kwargs = mock_model.generate.call_args.kwargs
     assert kwargs["prompt"] == "ocean waves"
-    assert kwargs["duration"] == 30.0
+    assert kwargs["duration"] == 120.0
     assert kwargs["steps"] == 8
     assert kwargs["cfg_scale"] == 1.0
     assert kwargs["seed"] == -1
