@@ -124,11 +124,37 @@ step "Running ./install.sh -y"
 ./install.sh -y
 
 # ── 5. inference ────────────────────────────────────────────────────────────
+# Run as a subprocess (not `exec`) so we can drop the user into an
+# interactive shell here when it finishes.
 if [[ $# -gt 0 ]]; then
     step "Running ./sa3 $*"
-    exec ./sa3 "$@"
+    ./sa3 "$@" || true
 else
     step "Running demo: ./sa3 ${DEFAULT_ARGS[*]}"
     printf '  %s(pass your own args via:  curl -LsSf https://raw.githubusercontent.com/Stability-AI/stable-audio-3/main/optimized/mlx/bootstrap.sh | bash -s -- --prompt "..." ...)%s\n' "$DIM" "$RESET"
-    exec ./sa3 "${DEFAULT_ARGS[@]}"
+    ./sa3 "${DEFAULT_ARGS[@]}" || true
 fi
+
+# ── 6. drop user into an interactive shell sitting in the project dir ──────
+# A subprocess can't change its parent shell's cwd — but we CAN replace
+# ourselves with a fresh interactive shell, leaving the user at a prompt
+# inside ./$WORK_DIR. `exit` (or Ctrl-D) returns them to their original
+# shell, at their original cwd, just like a normal subshell.
+#
+# `< /dev/tty` is essential when bootstrap.sh was invoked via curl|bash:
+# stdin at this point is the (closed) pipe; an interactive shell needs a
+# real terminal. /dev/tty always refers to the user's controlling TTY.
+
+if [[ ! -e /dev/tty ]]; then
+    # Headless / scripted invocation — skip the shell drop.
+    exit 0
+fi
+
+USER_SHELL="${SHELL:-/bin/bash}"
+printf '\n%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$BOLD" "$RESET"
+printf '  %s✓ you are now in%s %s%s%s\n' "$GREEN" "$RESET" "$BOLD" "$(pwd)" "$RESET"
+printf '    %stype %s./sa3 --help%s for options, or %sexit%s to return to your previous shell%s\n' \
+    "$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET$BOLD" "$RESET$DIM" "$RESET"
+printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n\n' "$BOLD" "$RESET"
+
+exec "$USER_SHELL" -i < /dev/tty
