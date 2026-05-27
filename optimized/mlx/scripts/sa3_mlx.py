@@ -238,26 +238,40 @@ def save_wav(path: str, audio: np.ndarray, sample_rate: int = SAMPLE_RATE):
 
 
 def read_wav(path: str) -> np.ndarray:
-    """Read a 16-bit PCM WAV at 44.1 kHz. Returns (2, T) float32 in [-1, 1].
+    """Read a WAV file. Returns (2, T) float32 in [-1, 1].
 
-    Mono input is duplicated to stereo. Other sample rates / bit-depths error out
-    with a hint to ffmpeg-resample first — keeps this script dependency-free.
+    Handles 16-bit PCM at 44.1 kHz natively. Falls back to ffmpeg for any
+    other format (24-bit, 32-bit float, 48 kHz, etc.)
+    Mono input is duplicated to stereo.
     """
-    with wave.open(path, "rb") as w:
-        nch, sw, sr, nframes = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
-        if sr != SAMPLE_RATE:
-            raise ValueError(
-                f"{path}: sample rate {sr} Hz; need {SAMPLE_RATE}. "
-                f"Resample first: ffmpeg -i {path} -ar {SAMPLE_RATE} -ac 2 -sample_fmt s16 out.wav"
-            )
-        if sw != 2:
-            raise ValueError(f"{path}: {sw*8}-bit WAV; need 16-bit PCM. Convert with ffmpeg.")
-        raw = np.frombuffer(w.readframes(nframes), dtype=np.int16).astype(np.float32) / 32767.0
-    if nch == 1:
-        audio = np.stack([raw, raw], axis=0)            # (2, T)
-    else:
-        audio = raw.reshape(-1, nch).T[:2]              # (2, T)
-    return audio
+    try:
+        with wave.open(path, "rb") as w:
+            nch, sw, sr, nframes = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+            if sr == SAMPLE_RATE and sw == 2:
+                raw = np.frombuffer(w.readframes(nframes), dtype=np.int16).astype(np.float32) / 32767.0
+                if nch == 1:
+                    return np.stack([raw, raw], axis=0)   # (2, T)
+                return raw.reshape(-1, nch).T[:2]          # (2, T)
+    except wave.Error:
+        pass  # unsupported format (32-bit float, 24-bit PCM, etc.)
+
+    # Fallback: decode via ffmpeg — handles any sample rate, bit depth, or format
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", path,
+             "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-"],
+            capture_output=True, check=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"{path}: unsupported WAV format. Install ffmpeg to handle 24-bit/32-bit/48kHz audio:\n"
+            f"  brew install ffmpeg\n"
+            f"Or convert manually: ffmpeg -i \"{path}\" -ar {SAMPLE_RATE} -ac 2 -sample_fmt s16 resampled.wav"
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"{path}: ffmpeg failed — {e.stderr.decode().strip()}")
+    raw = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32767.0
+    return raw.reshape(-1, 2).T  
 
 
 def load_encoder(decoder_name: str, dtype):
