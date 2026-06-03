@@ -22,9 +22,14 @@ Args:
 Optional flags:
     --opt N           Optimization point on L axis (default 1292). TRT picks
                        kernels to run fastest at this shape.
+    --precision P     "bf16" (default, matches canonical build) or "fp32"
+                       (omits the BF16 flag entirely — forces full FP32
+                       execution; engine ~2x larger, build slower).
 
 Build flags mirror sa3-sm-music / sa3-m in build_from_onnx.py: BF16 +
-EXPLICIT_BATCH, 16 GB workspace.
+EXPLICIT_BATCH, 16 GB workspace. With --precision fp32 the BF16 flag is
+omitted; this lets us test whether BF16 rounding (e.g. in RoPE) is the
+source of the long-clip silence artifact at T_lat=1292.
 """
 import os
 import sys
@@ -78,9 +83,12 @@ def _local_onnx_root() -> Path:
 
 
 def build_dit(target_name: str, profile_min: int, output_name: str,
-              profile_opt: int = 1292, profile_max: int = 4096) -> str:
+              profile_opt: int = 1292, profile_max: int = 4096,
+              precision: str = "bf16") -> str:
     if target_name not in TARGETS:
         sys.exit(f"unknown target {target_name!r}; valid: {list(TARGETS)}")
+    if precision not in ("bf16", "fp32"):
+        sys.exit(f"precision={precision!r} must be one of: bf16, fp32")
     if not (profile_min <= profile_opt <= profile_max):
         sys.exit(f"profile_opt={profile_opt} must satisfy "
                  f"min={profile_min} <= opt <= max={profile_max}")
@@ -90,7 +98,8 @@ def build_dit(target_name: str, profile_min: int, output_name: str,
     if not onnx_path.exists():
         sys.exit(f"ONNX not found at {onnx_path}")
 
-    print(f"\n━━━ build_dit_profile: {target_name} min={profile_min} opt={profile_opt} → {output_name} ━━━")
+    print(f"\n━━━ build_dit_profile: {target_name} min={profile_min} opt={profile_opt} "
+          f"precision={precision} → {output_name} ━━━")
     print(f"  onnx: {onnx_path}", flush=True)
     sz_b = onnx_path.stat().st_size
     sidecar = onnx_path.with_suffix(onnx_path.suffix + ".data")
@@ -122,14 +131,25 @@ def build_dit(target_name: str, profile_min: int, output_name: str,
 
     cfg = builder.create_builder_config()
     cfg.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
-    cfg.set_flag(trt.BuilderFlag.BF16)
+    if precision == "bf16":
+        cfg.set_flag(trt.BuilderFlag.BF16)
+    else:
+        # Pure FP32: do NOT set BF16 (or FP16). We additionally set
+        # OBEY_PRECISION_CONSTRAINTS so TRT can't silently downcast layers to
+        # lower precision if it judges it "safe" — we want full FP32 to test
+        # the hypothesis that BF16 rounding (e.g. in RoPE) causes the
+        # long-clip silence artifact.
+        try:
+            cfg.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
+        except AttributeError:
+            pass
 
     profile = builder.create_optimization_profile()
     for input_name, (lo, opt, hi) in profile_shapes.items():
         profile.set_shape(input_name, lo, opt, hi)
     cfg.add_optimization_profile(profile)
     print(f"  profile: x/local_add_cond L=({profile_min}, {profile_opt}, 4096), "
-          f"workspace 16 GB, BF16", flush=True)
+          f"workspace 16 GB, precision={precision.upper()}", flush=True)
 
     print(f"  building...", flush=True)
     t0 = time.time()
@@ -167,9 +187,13 @@ def main():
     ap.add_argument("--max", dest="profile_max", type=int, default=4096,
                     help="Maximum L for the profile (default 4096). Set to "
                          "match min for a fully-static engine.")
+    ap.add_argument("--precision", choices=("bf16", "fp32"), default="bf16",
+                    help="Builder precision: bf16 (default, matches canonical) "
+                         "or fp32 (omits BF16 flag, forces FP32 throughout).")
     args = ap.parse_args()
     build_dit(args.target_name, args.profile_min, args.output_name,
-              profile_opt=args.profile_opt, profile_max=args.profile_max)
+              profile_opt=args.profile_opt, profile_max=args.profile_max,
+              precision=args.precision)
 
 
 if __name__ == "__main__":

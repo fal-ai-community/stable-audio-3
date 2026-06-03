@@ -29,7 +29,7 @@ The canonical CLI invokes one inference per process, so users never see
 the drift in practice.
 """
 from __future__ import annotations
-import argparse, math, os, random, sys, time, wave
+import argparse, math, os, random, sys, threading, time, wave
 from pathlib import Path
 import numpy as np
 
@@ -314,7 +314,13 @@ class FullPipelineGraph:
                 self.dec_runner.context.execute_async_v3(capture_stream.cuda_stream)
                 # Stage 5a: narrow + cast int32 → int16 (or legacy fp32 → int16)
                 if self._dec_out_name == "pcm":
-                    self.pcm_int16_buf.copy_(self.pcm_int32_buf[0])
+                    # Belt-and-suspenders int16 clamp. New engines (from the
+                    # FP32 clip+scale fix in the ONNX producer) already bound
+                    # the int32 output to ±32767, so this is a no-op for them.
+                    # Kept for backwards-compat with any older engine still in
+                    # use, which has BF16 trunk rounding 32767 → 32768 and
+                    # wrapping on int16 downcast (audible clicks).
+                    self.pcm_int16_buf.copy_(self.pcm_int32_buf[0].clamp(-32767, 32767))
                 else:
                     a = self._audio_legacy_buf[0].clamp(-1.0, 1.0) * 32767.0
                     self.pcm_int16_buf.copy_(a.to(canon.torch.int16).T)
@@ -364,6 +370,243 @@ class FullPipelineGraph:
         stream.synchronize()
         # pinned_host_pcm has been written by the DtoH; return a view.
         return self.pinned_host_pcm[:self.requested_samples].numpy()
+
+
+# ─── Reusable inference class (CLI + gradio share this) ─────────────────
+class SA3Inference:
+    """SA3 TRT inference, set up once and reused.
+
+    Loads engines + warms up + builds a CUDA graph at __init__. Subsequent
+    generate() calls are graph replays (~30 ms on H100 at L=324). Different
+    (T_lat, steps) combos build their own graphs on demand and are cached
+    (LRU evict at MAX_GRAPHS).
+
+    MVP scope: cfg=1.0, no init_audio, no inpaint, sigma_max=1.0 — i.e. the
+    mega-graph fast path. Other configs raise NotImplementedError; the
+    eager-fallback wiring is the next step.
+
+    Thread-safe: serialize_generate() acquires an internal Lock so two
+    callers can't trample the shared CUDA stream / persistent buffers.
+    """
+
+    MAX_GRAPHS = 4
+    DEFAULT_SIGMA_MAX = 1.0  # mega-graph path requires this
+
+    def __init__(self, dit: str, decoder: str, *,
+                 default_T_lat: int = 324, default_steps: int = 8,
+                 default_seconds: float = 30.0,
+                 models_dir: Path | None = None,
+                 with_encoder: bool = False,
+                 quiet: bool = False):
+        """Load engines + build a warmup graph.
+
+        Args:
+            dit:            one of DIT_CHOICES — "sm-music" / "sm-sfx" / "medium"
+            decoder:        one of DECODER_PATHS — "same-s" / "same-l"
+            default_T_lat:  latent length to build the initial graph at
+            default_steps:  pingpong steps for the initial graph
+            default_seconds: duration condition for the initial graph (used for
+                            the warmup pass; per-call generate() overrides)
+            models_dir:     override the canonical models/ root (optional)
+            with_encoder:   also load the audio encoder TRT engine (needed for
+                            future audio-to-audio / inpaint modes)
+            quiet:          suppress per-stage print() output from canon helpers
+        """
+        if dit not in DIT_CHOICES:
+            raise ValueError(f"unknown dit={dit!r}; valid: {list(DIT_CHOICES)}")
+        if decoder not in DECODER_PATHS:
+            raise ValueError(f"unknown decoder={decoder!r}; valid: {list(DECODER_PATHS)}")
+
+        # Quiet: patch canon's stage/sub/_stage_vram to no-ops so loading
+        # doesn't spam stdout (gradio in particular wants a clean log).
+        if quiet:
+            canon._USE_COLOR = False
+            canon.stage = lambda *a, **kw: None
+            canon.sub = lambda *a, **kw: None
+            canon._stage_vram = lambda *a, **kw: 0
+
+        # models-dir override (mirrors main()'s logic).
+        if models_dir is not None and str(models_dir) != str(canon.MODELS_DIR):
+            new_root = Path(models_dir).resolve()
+            new_arch_dir = new_root / ARCH
+            canon.T5GEMMA_PATH = new_arch_dir / "t5gemma" / "t5gemma_fp16mixed.trt"
+            for kk in DIT_CHOICES:
+                DIT_CHOICES[kk]["engine"] = new_arch_dir / DIT_CHOICES[kk]["engine"].relative_to(canon.ARCH_DIR)
+            for kk in DECODER_PATHS:
+                DECODER_PATHS[kk] = new_arch_dir / DECODER_PATHS[kk].relative_to(canon.ARCH_DIR)
+            for kk in ENCODER_PATHS:
+                ENCODER_PATHS[kk] = new_arch_dir / ENCODER_PATHS[kk].relative_to(canon.ARCH_DIR)
+            canon.MODELS_DIR = new_root
+            canon.ARCH_DIR = new_arch_dir
+
+        self.dit_name = dit
+        self.decoder_name = decoder
+        self.with_encoder = with_encoder
+        self.quiet = quiet
+
+        # 1. Lazy-download any missing engines.
+        needed = list(SHARED_FILES)
+        needed += DIT_ENGINE_FILES[dit]
+        needed += DECODER_FILES[decoder]
+        if with_encoder:
+            needed += ENCODER_FILES[decoder]
+        _ensure_files(needed)
+
+        # 2. Heavy imports (torch + tensorrt + plugin).
+        sub(dim("Loading..."))
+        t0 = time.time()
+        _import_heavy()
+        sub(f"{dim('heavy imports')} {(time.time()-t0)*1000:.0f} ms")
+        _init_nvml()
+        torch = canon.torch
+
+        # 3. Tokenizer + dist_shift (from bundled runtime.py).
+        t0 = time.time()
+        import runtime as rt
+        rt.MODELS_DIR = str(canon.MODELS_DIR)
+        rt.ARCH_DIR = str(canon.ARCH_DIR)
+        state = rt.load()
+        self.tokenizer = state["tokenizer"]
+        self.dist_shift = state["dist_shift"]
+        sub(f"{dim('tokenizer + dist-shift')} {(time.time()-t0)*1000:.0f} ms")
+
+        # 4. Engine load (parallel).
+        import concurrent.futures
+        engine_specs = {
+            "t5":  canon.T5GEMMA_PATH,
+            "dit": DIT_CHOICES[dit]["engine"],
+            "dec": DECODER_PATHS[decoder],
+        }
+        if with_encoder:
+            engine_specs["enc"] = ENCODER_PATHS[decoder]
+        t0 = time.time()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(engine_specs)) as ex:
+            futs = {name: ex.submit(TRTRunner, path) for name, path in engine_specs.items()}
+            self.runners = {name: fut.result() for name, fut in futs.items()}
+        sub(f"{dim(f'engine load (parallel, {len(self.runners)} engines)')} {(time.time()-t0)*1000:.0f} ms")
+
+        self.dit = DiTRunner(self.runners["dit"])
+
+        # 5. Graph cache + lock.
+        self._graphs: dict[tuple[int, int], FullPipelineGraph] = {}
+        self._graph_lru: list[tuple[int, int]] = []
+        self._lock = threading.Lock()
+
+        # 6. Build the initial graph at the default config.
+        t0 = time.time()
+        self.get_graph(default_T_lat, default_steps, default_seconds)
+        torch.cuda.synchronize()
+        sub(f"{dim(f'warmup + capture (T_lat={default_T_lat}, steps={default_steps})')} "
+            f"{(time.time()-t0)*1000:.0f} ms")
+
+    @staticmethod
+    def resolve_T_lat(seconds: float, decoder: str) -> int:
+        """seconds → T_lat (natural ceil; no even-bump).
+
+        Earlier code bumped T_lat to even for same-s under the assumption that
+        the BF16 trunk's internal chunking required it. Empirically, on real
+        DiT-output latents the engine produces correct audio (cos ≥ 0.99 vs
+        PT eager) at any L in [32, 4096], odd or even. Removing the bump keeps
+        the DiT sequence length at exactly what the user requested.
+        """
+        return max(1, math.ceil(seconds * SAMPLE_RATE / SAMPLES_PER_LATENT))
+
+    def get_graph(self, T_lat: int, steps: int, seconds: float) -> FullPipelineGraph:
+        """Return the cached graph for (T_lat, steps), building on miss.
+
+        LRU-evicts when the cache exceeds MAX_GRAPHS to keep VRAM bounded.
+        Called under the inference lock when reached from generate().
+        """
+        key = (T_lat, steps)
+        if key in self._graphs:
+            self._graph_lru.remove(key)
+            self._graph_lru.append(key)
+            return self._graphs[key]
+
+        sigma_max = self.DEFAULT_SIGMA_MAX
+        sigmas = build_pingpong_schedule(steps, sigma_max=sigma_max,
+                                          dist_shift=self.dist_shift, latent_len=T_lat)
+        # Size output buffer to MAX possible for this T_lat. generate() slices
+        # to the actual requested samples, so one graph per (T_lat, steps)
+        # serves any seconds within that T_lat's range.
+        max_samples = T_lat * SAMPLES_PER_LATENT
+        graph = FullPipelineGraph(self.runners["t5"], self.dit, self.runners["dec"],
+                                   T_lat, steps, max_samples)
+        graph.build(sigmas, seconds, sigma_max)
+        canon.torch.cuda.synchronize()
+
+        self._graphs[key] = graph
+        self._graph_lru.append(key)
+        # LRU eviction. Python GC + torch's caching allocator reclaim GPU
+        # memory once the FullPipelineGraph reference is dropped.
+        while len(self._graphs) > self.MAX_GRAPHS:
+            evict = self._graph_lru.pop(0)
+            del self._graphs[evict]
+        return graph
+
+    def generate(self, prompt: str, *,
+                 seconds: float = 30.0, steps: int = 8,
+                 seed: int | None = None,
+                 # Below: MVP raises NotImplementedError; wiring planned.
+                 init_noise_level: float = 1.0,
+                 negative_prompt: str | None = None,
+                 cfg: float = 1.0,
+                 init_audio_path: str | None = None,
+                 inpaint_range: tuple[float, float] | None = None,
+                 ) -> tuple[np.ndarray, dict]:
+        """Generate one audio clip. Returns (pcm_int16, timing_dict).
+
+        Returns:
+            pcm:    (T_samples, 2) int16 numpy array, T_samples = round(seconds*44100)
+            timing: dict with 'inference_ms', 'graph_build_ms' (0 if cache hit),
+                    'realtime', 'seed', 'T_lat', 'samples'
+        """
+        # MVP scope gate. These all raise; SA3Inference is wired for them on
+        # the API surface but the implementations route through the eager
+        # path in sa3_trt_core (TBD).
+        if cfg != 1.0:
+            raise NotImplementedError("CFG support not yet wired through SA3Inference")
+        if init_audio_path is not None:
+            raise NotImplementedError("audio-to-audio not yet wired through SA3Inference")
+        if inpaint_range is not None:
+            raise NotImplementedError("inpaint not yet wired through SA3Inference")
+        if init_noise_level != 1.0:
+            raise NotImplementedError("non-unity init_noise_level not yet wired")
+
+        T_lat = self.resolve_T_lat(seconds, self.decoder_name)
+        if not (1 <= T_lat <= 4096):
+            raise ValueError(f"T_lat={T_lat} out of engine range [1, 4096]")
+        if seed is None:
+            seed = random.randint(0, 2**31 - 1)
+
+        with self._lock:
+            t0 = time.time()
+            graph = self.get_graph(T_lat, steps, seconds)
+            graph_build_ms = (time.time() - t0) * 1000
+
+            # Tokenize on CPU (outside graph).
+            tok = self.tokenizer(prompt, return_tensors="pt", max_length=T5_MAX_LEN,
+                                  padding="max_length", truncation=True)
+            ids_cpu = tok["input_ids"]
+            mask_cpu = tok["attention_mask"]
+
+            t0 = time.time()
+            pcm_full = graph.run(ids_cpu, mask_cpu, seed=int(seed), seconds=seconds)
+            inference_ms = (time.time() - t0) * 1000
+
+        # Slice and detach from the pinned-host buffer (the next run() would
+        # overwrite it — we want a stable copy to hand to the caller).
+        actual_samples = int(round(seconds * SAMPLE_RATE))
+        pcm = pcm_full[:actual_samples].copy()
+
+        return pcm, {
+            "inference_ms":   inference_ms,
+            "graph_build_ms": graph_build_ms,
+            "realtime":       (seconds * 1000.0) / inference_ms if inference_ms > 0 else 0.0,
+            "seed":           int(seed),
+            "T_lat":          T_lat,
+            "samples":        actual_samples,
+        }
 
 
 # ─── Main (mirrors sa3_trt.main() but routes through FullPipelineGraph) ─

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Launcher for the SA3 A/B comparison gradio (PyTorch eager vs Full TRT).
+# Uses the producer venv (has gradio + tensorrt + stable_audio_tools).
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PT_VENV_PY="/admin/home-cj/sa/venvs/sa3_torch29/bin/python"
+if [ ! -x "${PT_VENV_PY}" ]; then
+    echo "error: producer venv not found at ${PT_VENV_PY}" >&2
+    exit 1
+fi
+exec "${PT_VENV_PY}" "${SCRIPT_DIR}/scripts/ab_gradio.py" "$@"

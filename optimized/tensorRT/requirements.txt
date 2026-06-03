@@ -6,3 +6,4 @@ numpy
 tokenizers
 huggingface-hub
 nvidia-ml-py    # process-local VRAM tracking (replaces pynvml — same module name)
+gradio>=4.0     # web UI wrapper (./sa3-gradio); not used by the CLI ./sa3

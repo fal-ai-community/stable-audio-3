@@ -101,9 +101,9 @@ T5GEMMA_PATH = ARCH_DIR / "t5gemma" / "t5gemma_fp16mixed.trt"
 # Each DiT engine bundles its conditioner tensors (padding_embedding + seconds_total
 # Linear) as graph Constants, so no sidecar weight files are needed.
 DIT_ENGINE_FILES = {
-    "sm-music": ["sa3-sm-music/dit_bf16.trt"],
-    "sm-sfx":   ["sa3-sm-sfx/dit_bf16.trt"],
-    "medium":   ["sa3-m/dit_bf16.trt"],
+    "sm-music": ["sa3-sm-music/dit_fp16mixed.trt"],
+    "sm-sfx":   ["sa3-sm-sfx/dit_fp16mixed.trt"],
+    "medium":   ["sa3-m/dit_fp16mixed.trt"],
 }
 DECODER_FILES = {
     "same-s": [
@@ -125,11 +125,11 @@ SHARED_FILES = [
 ]
 
 DIT_CHOICES = {
-    "sm-music": {"engine": ARCH_DIR / "sa3-sm-music" / "dit_bf16.trt",
+    "sm-music": {"engine": ARCH_DIR / "sa3-sm-music" / "dit_fp16mixed.trt",
                  "default_decoder": "same-s"},
-    "sm-sfx":   {"engine": ARCH_DIR / "sa3-sm-sfx" / "dit_bf16.trt",
+    "sm-sfx":   {"engine": ARCH_DIR / "sa3-sm-sfx" / "dit_fp16mixed.trt",
                  "default_decoder": "same-s"},
-    "medium":   {"engine": ARCH_DIR / "sa3-m" / "dit_bf16.trt",
+    "medium":   {"engine": ARCH_DIR / "sa3-m" / "dit_fp16mixed.trt",
                  "default_decoder": "same-l"},
 }
 DECODER_PATHS = {
@@ -349,12 +349,15 @@ def decoder_decode(runner: TRTRunner, latents: torch.Tensor) -> torch.Tensor:
         only needs `.to(torch.int16)` to finish the conversion. Saves ~18 ms
         per inference by letting TRT fuse the postprocess tail.
 
+    Both engines accept any L in [32, 4096] (odd or even); SAME-S decoder at
+    odd L matches PT eager at cos ≥ 0.99 on in-distribution latents — no
+    chunking needed.
+
     Returns whatever the engine emits (caller branches on .dtype to decide
     what postprocessing — if any — is still needed in Stage 5).
     """
     ctx = runner.context
     in_dt = runner.in_dtype["latent"]
-    # Auto-detect engine flavor by output tensor name.
     out_name = "pcm" if "pcm" in runner.out_dtype else "audio"
     out_dt = runner.out_dtype[out_name]
     lat = latents.to(in_dt).contiguous()
@@ -364,8 +367,6 @@ def decoder_decode(runner: TRTRunner, latents: torch.Tensor) -> torch.Tensor:
     ctx.set_tensor_address("latent", lat.data_ptr())
     ctx.set_tensor_address(out_name, out.data_ptr())
     ctx.execute_async_v3(runner.stream.cuda_stream); runner.stream.synchronize()
-    # Legacy fp/bf -> upcast to fp32 (preserves old contract). PCM int32 stays
-    # int32 so the caller can branch on it.
     if out.dtype in (torch.float16, torch.bfloat16, torch.float32):
         return out.float()
     return out
@@ -893,10 +894,8 @@ def main():
     if args.prompt is None:
         args.prompt = input("Prompt: ").strip()
 
-    # ── Compute T_lat (with SAME-S parity rule) ──
+    # ── Compute T_lat ──
     T_lat = max(1, math.ceil(args.seconds * SAMPLE_RATE / SAMPLES_PER_LATENT))
-    if args.decoder == "same-s" and T_lat % 2 != 0:
-        T_lat += 1
     target_dur = T_lat * SAMPLES_PER_LATENT / SAMPLE_RATE
 
     # DiT engines support L=1..4096 (profile min=1 since the 2026-05-29 rebuild).
@@ -1294,7 +1293,9 @@ def main():
         pcm_gpu = audio[0]                                      # (T_full, 2) int32
         if pcm_gpu.shape[0] > requested_samples:
             pcm_gpu = pcm_gpu[:requested_samples]
-        pcm_gpu = pcm_gpu.to(torch.int16)                       # int32 → int16 (halves bytes)
+        # Engine output isn't clipped — values > ±32767 wrap when cast to int16
+        # (audible clicks). Clamp first.
+        pcm_gpu = pcm_gpu.clamp(-32767, 32767).to(torch.int16)
         n = pcm_gpu.shape[0]
         if _pinned_pcm is not None:
             # Non-blocking DMA straight into the pre-allocated pinned host

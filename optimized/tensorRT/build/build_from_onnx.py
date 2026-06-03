@@ -14,9 +14,8 @@ Usage:
     python build_from_onnx.py same-s-decoder
     python build_from_onnx.py same-l-encoder
     python build_from_onnx.py same-l-decoder
-    python build_from_onnx.py sa3-sm-music
-    python build_from_onnx.py sa3-sm-sfx
-    python build_from_onnx.py sa3-m
+    # SA3 DiT engines use a different builder (FP16-mixed recipe):
+    python build_dit_fp16mixed.py --input <onnx> --engine <out.trt>
     python build_from_onnx.py all          # build everything for this arch
 """
 import os
@@ -110,30 +109,34 @@ TARGETS = {
         "profile":      {"latent": [(1, 256, 32), (1, 256, 1292), (1, 256, 4096)]},
         "plugin":       True,
     },
+    # SA3 DiT engines: build from the pre-processed FP16-mixed ONNX hosted on
+    # HF. The producer (build_dit_fp16mixed.py) does the FP32-island surgery
+    # once and uploads the result; consumers just compile with STRONGLY_TYPED
+    # (no onnx-graphsurgeon dependency).
     "sa3-sm-music": {
-        "onnx_hf":      ["sa3-sm-music/dit.onnx"],
-        "trt_local":    "sa3-sm-music/dit_bf16.trt",
-        "flags":        {"BF16"},
-        "network":      "EXPLICIT_BATCH",
+        "onnx_hf":      ["sa3-sm-music/dit_fp16mixed.onnx"],
+        "trt_local":    "sa3-sm-music/dit_fp16mixed.trt",
+        "flags":        set(),         # STRONGLY_TYPED + ONNX dtypes carry precision
+        "network":      "STRONGLY_TYPED",
         "workspace_gb": 16,
         "profile":      _DIT_PROFILE,
         "plugin":       False,
     },
     "sa3-sm-sfx": {
-        "onnx_hf":      ["sa3-sm-sfx/dit.onnx"],
-        "trt_local":    "sa3-sm-sfx/dit_bf16.trt",
-        "flags":        {"BF16"},
-        "network":      "EXPLICIT_BATCH",
+        "onnx_hf":      ["sa3-sm-sfx/dit_fp16mixed.onnx"],
+        "trt_local":    "sa3-sm-sfx/dit_fp16mixed.trt",
+        "flags":        set(),
+        "network":      "STRONGLY_TYPED",
         "workspace_gb": 16,
         "profile":      _DIT_PROFILE,
         "plugin":       False,
     },
     "sa3-m": {
-        # The medium DiT's ONNX exceeds 2 GB, so it has an external data sidecar.
-        "onnx_hf":      ["sa3-m/dit.onnx", "sa3-m/dit.onnx.data"],
-        "trt_local":    "sa3-m/dit_bf16.trt",
-        "flags":        {"BF16"},
-        "network":      "EXPLICIT_BATCH",
+        # 2.9 GB external-data sidecar travels alongside.
+        "onnx_hf":      ["sa3-m/dit_fp16mixed.onnx", "sa3-m/dit_fp16mixed.onnx.data"],
+        "trt_local":    "sa3-m/dit_fp16mixed.trt",
+        "flags":        set(),
+        "network":      "STRONGLY_TYPED",
         "workspace_gb": 16,
         "profile":      _DIT_PROFILE,
         "plugin":       False,

@@ -13,14 +13,18 @@ Run the build on the target GPU; TensorRT bakes the arch into the engine, so the
 ```
                               consumer flow                producer flow
                               ─────────────                ─────────────
-HuggingFace                    onnx/<engine>/  ←─────── publish
+HuggingFace                    onnx/<engine>/  ←─────── publish (incl. dit_fp16mixed.onnx)
    tensorRT/<arch>/   ←─── compile + commit              source ckpts
                               │                              │
                               ↓                              ↓
                          build.py                      build_*.py
                          build_from_onnx.py            (build_t5gemma.py,
-                                                       build_dit.py, ...)
+                            (just compile,              build_dit.py,
+                             STRONGLY_TYPED;            build_dit_fp16mixed.py,
+                             no graphsurgeon)            build_same_*.py)
 ```
+
+The SA3 DiT ships both an FP32 canonical `dit.onnx` (regenerable from PyTorch source) and a pre-processed `dit_fp16mixed.onnx` (canonical + FP32 islands around RMSNorm / Softmax / RoPE, rest converted to FP16). Consumers use the pre-processed one; producers refresh both when the model retrains.
 
 ## Consumer flow (default)
 
@@ -122,6 +126,20 @@ python build_dit.py sa3-sm-sfx
 python build_dit.py sa3-m
 ```
 
+After the DiT ONNXes are exported, run the FP16-mixed precision-island surgery on each one (see `build_dit_fp16mixed.py`):
+
+```bash
+python build_dit_fp16mixed.py \
+    --input  <HF_REPO>/onnx/sa3-sm-music/dit.onnx \
+    --onnx   <HF_REPO>/onnx/sa3-sm-music/dit_fp16mixed.onnx \
+    --engine ../models/<arch>/sa3-sm-music/dit_fp16mixed.trt
+# repeat for sa3-sm-sfx and sa3-m
+```
+
+This wraps every RMSNorm chain, attention `Softmax`, and the RoPE region in `Cast(FP32) → op → Cast(FP16)` islands and converts the rest of the weights to FP16, then compiles a `STRONGLY_TYPED` TRT engine. It writes BOTH the modified `dit_fp16mixed.onnx` (~half the size of the original) AND the TRT engine. Publishing the modified ONNX is what lets consumers compile their own engines with plain `build_from_onnx.py` (no `onnx-graphsurgeon` dependency on the consumer side).
+
+Naive `BuilderFlag.FP16` (without the surgery) catastrophically overflows in RMSNorm variance + attention softmax — the islands are mandatory. BF16 was tried earlier and compounds quantisation error over 8 sampling steps (cos-sim drifts from 0.99 single-step to 0.81 final-latent vs PT FP32) — audibly degraded.
+
 Each script also writes the ONNX to `<HF_REPO>/onnx/<engine>/<file>.onnx`. After all 8 are done:
 
 ```bash
@@ -137,14 +155,15 @@ git push
 | File | Role | Flow |
 |---|---|---|
 | `build.py` | Interactive menu (default entry point) | consumer |
-| `build_from_onnx.py` | One target → download ONNX + compile | consumer |
-| `build_dit_profile.py` | Build a DiT with custom `(min, opt, max)` profile shapes (experimental — short-form / fixed-shape variants) | consumer |
+| `build_from_onnx.py` | One target → download ONNX from HF + compile to TRT. **For the SA3 DiTs, pulls `dit_fp16mixed.onnx` (the pre-processed island-wrapped graph)** so the consumer just needs to invoke `STRONGLY_TYPED` compilation — no `onnx-graphsurgeon` required | consumer |
+| `build_dit_profile.py` | Build a DiT with custom `(min, opt, max)` profile shapes (experimental — short-form / fixed-shape variants). Operates on either ONNX flavor. | consumer |
+| `build_dit_fp16mixed.py` | **Producer-side** ONNX surgery: takes the canonical FP32 `dit.onnx`, finds RMSNorm chains + attention `Softmax` + RoPE region, wraps each in `Cast(FP32) ↔ Cast(FP16)` islands, converts non-island weights to FP16, and writes both the modified `dit_fp16mixed.onnx` AND the TRT engine. Only re-run when the model retrains or the island recipe changes. Requires `onnx` + `onnx-graphsurgeon`. | producer |
 | `build_t5gemma.py` | Trace + export T5Gemma encoder ONNX + build TRT | producer |
 | `build_same_s_decoder.py` | Trace + export SAME-S decoder ONNX + build TRT | producer |
 | `build_same_s_encoder.py` | Trace + export SAME-S encoder ONNX + build TRT | producer |
 | `build_same_l_decoder.py` | Trace + export SAME-L decoder ONNX (Triton SWA) + build TRT | producer |
 | `build_same_l_encoder.py` | Trace + export SAME-L encoder ONNX (Triton SWA) + build TRT | producer |
-| `build_dit.py <NAME>` | Trace + export DiT ONNX (cond baked in) + build TRT | producer |
+| `build_dit.py <NAME>` | Trace + export DiT FP32 ONNX (cond baked in) + build TRT BF16 engine (legacy; the BF16 output isn't suitable for inference — chain it with `build_dit_fp16mixed.py` afterwards) | producer |
 | `_arch.py` | Shared: GPU arch detection + path helpers | both |
 | `samel_loader.py` | Helper: load SAME-L from .ckpt | producer |
 | `samel_{encoder,decoder}_onnx.py` | Helper: clean ONNX rewrites of SAME-L blocks | producer |

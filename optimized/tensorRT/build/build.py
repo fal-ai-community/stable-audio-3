@@ -65,15 +65,17 @@ TARGETS = [
     {"label": "same-l decoder (Triton SWA plugin, FP16-mixed)",
      "command": _from_onnx("same-l-decoder"),
      "outputs": ["same-l/dec_dynamic_triton_swa.trt"]},
-    {"label": "DiT medium  (SA3-M)",
+    # DiT engines now build from pre-processed FP16-mixed ONNX on HF;
+    # build_from_onnx.py does the simple STRONGLY_TYPED compile.
+    {"label": "DiT medium  (SA3-M, FP16-mixed)",
      "command": _from_onnx("sa3-m"),
-     "outputs": ["sa3-m/dit_bf16.trt"]},
-    {"label": "DiT sm-music",
+     "outputs": ["sa3-m/dit_fp16mixed.trt"]},
+    {"label": "DiT sm-music (FP16-mixed)",
      "command": _from_onnx("sa3-sm-music"),
-     "outputs": ["sa3-sm-music/dit_bf16.trt"]},
-    {"label": "DiT sm-sfx",
+     "outputs": ["sa3-sm-music/dit_fp16mixed.trt"]},
+    {"label": "DiT sm-sfx (FP16-mixed)",
      "command": _from_onnx("sa3-sm-sfx"),
-     "outputs": ["sa3-sm-sfx/dit_bf16.trt"]},
+     "outputs": ["sa3-sm-sfx/dit_fp16mixed.trt"]},
 ]
 
 
